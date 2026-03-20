@@ -76,7 +76,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 st.title("🔰 教えて！えどがわ議会AI 🦉")
-st.caption("「区議会って難しそう…」を解決！令和8年度の予算審査でどんな話し合いがあったのか、AIがやさしくお答えします✨　[あき@データで見る江戸川区](https://x.com/edogawa_aki)")
+st.caption("「区議会って難しそう…」を解決！令和8年度の予算審査でどんな話し合いがあったのか、AIがやさしくお答えします✨　作成者：[あき@データで見る江戸川区](https://x.com/edogawa_aki)")
 
 AVATARS = {"user": "👤", "assistant": "🦉"}
 
