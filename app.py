@@ -114,7 +114,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
         st.markdown(message["content"])
 
-if not st.session_state.messages:
+if not st.session_state.messages and "_suggest" not in st.session_state:
     st.markdown("💡 **まずは、気になるボタンをタップしてみてね！**")
     suggest_question = None
     if st.button("👶 子育て支援について"):
