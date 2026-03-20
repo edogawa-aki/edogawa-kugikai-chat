@@ -1,4 +1,6 @@
 import os
+import gspread
+from datetime import datetime
 import streamlit as st
 import streamlit.components.v1 as components
 from langchain_community.document_loaders import TextLoader
@@ -88,6 +90,18 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 
+def save_log(question, answer):
+    try:
+        credentials = st.secrets["gcp_service_account"]
+        gc = gspread.service_account_from_dict(credentials)
+        sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
+        worksheet = sh.get_worksheet(0)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        worksheet.append_row([now, question, answer])
+    except Exception as e:
+        print("Logging error: failed to write to spreadsheet")
+
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -151,7 +165,8 @@ if question:
                     "question": question,
                 })
                 st.markdown(answer)
+                save_log(question, answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
             except Exception as e:
                 st.error("申し訳ありません。回答の生成中にエラーが発生しました。時間をおいて再度お試しください。")
-                print(f"[ERROR] {e}")
+                print("[ERROR] Answer generation failed")
