@@ -104,6 +104,11 @@ if not st.session_state.messages:
         suggest_question = "小中学校の環境についてどのような議論がありましたか？"
     if col3.button("🔥 どんな話題が白熱している？"):
         suggest_question = "どんな話題について特に活発な議論や白熱したやり取りがありましたか？発言者名も教えてください。"
+    col4, col5 = st.columns(2)
+    if col4.button("💻 デジタル化・DXの進展について"):
+        suggest_question = "デジタル化・DXの進展についてはどのような議論がありましたか？"
+    if col5.button("👴 高齢者福祉について"):
+        suggest_question = "高齢者福祉についてはどのような議論がありましたか？"
     if suggest_question:
         st.session_state._suggest = suggest_question
         st.rerun()
