@@ -15,6 +15,15 @@ st.set_page_config(
     layout="wide",
 )
 
+components.html(
+    """
+    <script>
+    window.parent.document.documentElement.lang = 'ja';
+    </script>
+    """,
+    height=0,
+)
+
 MD_FILE_PATH = os.path.join(
     os.path.dirname(__file__),
     "output",
