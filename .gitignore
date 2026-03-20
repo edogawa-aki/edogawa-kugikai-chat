@@ -1,0 +1,21 @@
+# APIキー（絶対公開しない）
+.streamlit/secrets.toml
+
+# キャッシュやシステムファイル
+__pycache__/
+.DS_Store
+**/.DS_Store
+
+# 元データ（綺麗なcleaned版だけ上げるため、元のファイルは除外）
+combined_全審査.md
+output/*
+data/
+logs/
+scripts/
+.env
+clean_data.py
+PIPELINE.md
+requirements_video.txt
+
+# outputの中でこのファイルのみ含める
+!output/cleaned_全審査.md
