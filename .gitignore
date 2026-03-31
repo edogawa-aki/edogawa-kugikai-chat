@@ -1,10 +1,13 @@
 # APIキー（絶対公開しない）
 .streamlit/secrets.toml
+gcp-key.json
 
 # キャッシュやシステムファイル
 __pycache__/
 .DS_Store
 **/.DS_Store
+faiss_index/
+build_index.py
 
 # 元データ（綺麗なcleaned版だけ上げるため、元のファイルは除外）
 combined_全審査.md

@@ -3,5 +3,9 @@ langchain-core
 langchain-google-genai
 langchain-community
 langchain-text-splitters
-faiss-cpu
+langchain-google-firestore
+google-cloud-firestore
+google-auth
 gspread
+pandas
+streamlit-cookies-manager
