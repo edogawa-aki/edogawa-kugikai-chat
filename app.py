@@ -32,6 +32,7 @@ components.html(
 
 st.markdown("""
 <style>
+.block-container { padding-top: 1rem; }
 [data-testid="stChatMessage"] h1 { font-size: 1.4rem; }
 [data-testid="stChatMessage"] h2 { font-size: 1.2rem; }
 [data-testid="stChatMessage"] h3 { font-size: 1.05rem; }
@@ -173,7 +174,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 st.title("🔰 教えて！えどがわ議会AI 🦉")
-st.markdown("「区議会って難しそう…」を解決！令和8年度の予算審査でどんな話し合いがあったのか、AIがやさしくお答えします✨")
+st.markdown("「江戸川区政でどんな話がされているか知りたいが、議事録を読む時間がない…」を解決！江戸川区議会でどんな話し合いがあったのか、AIがやさしくお答えします✨")
 st.markdown("作成者：[あき@データで見る江戸川区](https://x.com/edogawa_aki)")
 st.info("🔒 **ログの収集について**\n\n入力内容はアプリ改善のため匿名で記録されます。個人情報は入力しないでください。", icon="ℹ️")
 
@@ -310,8 +311,11 @@ if st.session_state.pop("_scroll_to_bottom", False):
     components.html("""
     <script>
         setTimeout(function() {
-            const main = window.parent.document.querySelector('[data-testid="stAppViewBlockContainer"]');
-            if (main) main.scrollTop = main.scrollHeight;
-        }, 200);
+            const messages = window.parent.document.querySelectorAll('[data-testid="stChatMessage"]');
+            if (messages.length >= 2) {
+                // 最後から2番目 = 新しいユーザーメッセージ（最後はAIの回答）
+                messages[messages.length - 2].scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }, 300);
     </script>
     """, height=0)
