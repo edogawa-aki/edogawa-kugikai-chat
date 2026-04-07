@@ -8,11 +8,14 @@ __pycache__/
 **/.DS_Store
 faiss_index/
 build_index.py
+generate_recent_meetings.py
+plan.md
 
 # 元データ（綺麗なcleaned版だけ上げるため、元のファイルは除外）
 combined_全審査.md
 output/*
 data/
+data/processed_ids.json
 logs/
 scripts/
 .env
