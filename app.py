@@ -42,6 +42,8 @@ st.markdown("""
 [data-testid="stChatMessage"] h2 { font-size: 1.2rem; }
 [data-testid="stChatMessage"] h3 { font-size: 1.05rem; }
 [data-testid="stChatMessage"] h4 { font-size: 1.0rem; }
+@keyframes _fade1{0%,44%,100%{opacity:1}50%,94%{opacity:0}}
+@keyframes _fade2{0%,44%,100%{opacity:0}50%,94%{opacity:1}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -257,31 +259,22 @@ _SPINNER_HTML = (
 )
 
 
-def _start_status_rotation(placeholder, interval: int = 5) -> threading.Event:
-    stop = threading.Event()
-    msgs = [
-        f"✍️ AIが原稿を書いています...{_SPINNER_HTML}",
-        f"⏳ もう少しお待ちください...{_SPINNER_HTML}",
-    ]
-    def _worker():
-        i = 0
-        while not stop.wait(timeout=interval):
-            i += 1
-            try:
-                placeholder.markdown(msgs[i % 2], unsafe_allow_html=True)
-            except Exception:
-                break
-    threading.Thread(target=_worker, daemon=True).start()
-    return stop
+def _rotating_status_html() -> str:
+    return (
+        '<div style="position:relative;height:1.6em;font-size:1rem">'
+        f'<span style="position:absolute;animation:_fade1 10s ease-in-out infinite">'
+        f'✍️ AIが原稿を書いています...{_SPINNER_HTML}</span>'
+        f'<span style="position:absolute;animation:_fade2 10s ease-in-out infinite">'
+        f'⏳ もう少しお待ちください...{_SPINNER_HTML}</span>'
+        '</div>'
+    )
 
 
-def _stream_clear_status(gen, status_placeholder, stop_rotation=None):
+def _stream_clear_status(gen, status_placeholder):
     """最初のチャンクが来た瞬間にステータスプレースホルダーを消去するラッパー。"""
     first = True
     for chunk in gen:
         if first:
-            if stop_rotation:
-                stop_rotation.set()
             status_placeholder.empty()
             first = False
         yield chunk
@@ -500,20 +493,18 @@ if question:
                     all_docs.extend(search_docs(vectorstore, q, k=5))
                 context = format_docs(all_docs)
                 chain = recent_prompt | llm | StrOutputParser()
-                status.markdown(f"✍️ AIが原稿を書いています...{_SPINNER_HTML}", unsafe_allow_html=True)
-                stop_rotation = _start_status_rotation(status, interval=5)
+                status.markdown(_rotating_status_html(), unsafe_allow_html=True)
                 inputs = {"context": context, "question": question}
-                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status, stop_rotation))
+                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status))
             else:
                 status.markdown(f"🔍 議事録を読み込んでいます...{_SPINNER_HTML}", unsafe_allow_html=True)
                 docs = search_docs(vectorstore, question)
                 context = format_docs(docs)
                 print(f"[DEBUG] context先頭300文字: {context[:300]}", flush=True)
                 chain = prompt | llm | StrOutputParser()
-                status.markdown(f"✍️ AIが原稿を書いています...{_SPINNER_HTML}", unsafe_allow_html=True)
-                stop_rotation = _start_status_rotation(status, interval=5)
+                status.markdown(_rotating_status_html(), unsafe_allow_html=True)
                 inputs = {"context": context, "chat_history": chat_history, "question": question}
-                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status, stop_rotation))
+                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status))
 
             clean_answer = displayed
             nq_raw = st.session_state.pop("_streamed_nq_raw", None)
