@@ -17,6 +17,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from google.api_core.exceptions import ResourceExhausted
 
 st.set_page_config(
     page_title="教えて！えどがわ区議会AI",
@@ -85,7 +87,18 @@ def get_vectorstore(api_key: str):
     return vectorstore
 
 
-def search_docs(vectorstore, question: str, k: int = 20) -> list:
+@retry(
+    retry=retry_if_exception_type(ResourceExhausted),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    reraise=True,
+)
+def _similarity_search_with_retry(vectorstore, *args, **kwargs):
+    return vectorstore.similarity_search(*args, **kwargs)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_docs(_vectorstore, question: str, k: int = 20) -> list:
     """委員会名が含まれる場合はメタデータフィルター付き検索、それ以外は通常検索。"""
     from google.cloud.firestore_v1.base_query import FieldFilter
     matched = [c for c in KNOWN_COMMITTEES if c in question]
@@ -95,19 +108,20 @@ def search_docs(vectorstore, question: str, k: int = 20) -> list:
         all_docs = []
         for committee in matched:
             # 通常クエリ
-            filtered = vectorstore.similarity_search(
-                question, k=per_k,
+            filtered = _similarity_search_with_retry(
+                _vectorstore, question, k=per_k,
                 filters=FieldFilter("metadata.committee_name", "==", committee),
             )
             # 政策テーマ特化クエリ（事務的な日程・手続きを回避）
-            extra = vectorstore.similarity_search(
+            extra = _similarity_search_with_retry(
+                _vectorstore,
                 f"{committee} 政策 審議 報告 区民 予算 条例 事業",
                 k=per_k,
                 filters=FieldFilter("metadata.committee_name", "==", committee),
             )
             all_docs.extend(filtered + extra)
         return list({d.page_content: d for d in all_docs}.values())
-    return vectorstore.similarity_search(question, k=k)
+    return _similarity_search_with_retry(_vectorstore, question, k=k)
 
 
 cookies = CookieManager()
@@ -123,7 +137,7 @@ if "session_id" not in st.session_state:
 vectorstore = get_vectorstore(api_key)
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-2.5-flash",
     google_api_key=api_key,
     temperature=0,
 )
@@ -243,11 +257,31 @@ _SPINNER_HTML = (
 )
 
 
-def _stream_clear_status(gen, status_placeholder):
+def _start_status_rotation(placeholder, interval: int = 5) -> threading.Event:
+    stop = threading.Event()
+    msgs = [
+        f"✍️ AIが原稿を書いています...{_SPINNER_HTML}",
+        f"⏳ もう少しお待ちください...{_SPINNER_HTML}",
+    ]
+    def _worker():
+        i = 0
+        while not stop.wait(timeout=interval):
+            i += 1
+            try:
+                placeholder.markdown(msgs[i % 2], unsafe_allow_html=True)
+            except Exception:
+                break
+    threading.Thread(target=_worker, daemon=True).start()
+    return stop
+
+
+def _stream_clear_status(gen, status_placeholder, stop_rotation=None):
     """最初のチャンクが来た瞬間にステータスプレースホルダーを消去するラッパー。"""
     first = True
     for chunk in gen:
         if first:
+            if stop_rotation:
+                stop_rotation.set()
             status_placeholder.empty()
             first = False
         yield chunk
@@ -467,8 +501,9 @@ if question:
                 context = format_docs(all_docs)
                 chain = recent_prompt | llm | StrOutputParser()
                 status.markdown(f"✍️ AIが原稿を書いています...{_SPINNER_HTML}", unsafe_allow_html=True)
+                stop_rotation = _start_status_rotation(status, interval=5)
                 inputs = {"context": context, "question": question}
-                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status))
+                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status, stop_rotation))
             else:
                 status.markdown(f"🔍 議事録を読み込んでいます...{_SPINNER_HTML}", unsafe_allow_html=True)
                 docs = search_docs(vectorstore, question)
@@ -476,8 +511,9 @@ if question:
                 print(f"[DEBUG] context先頭300文字: {context[:300]}", flush=True)
                 chain = prompt | llm | StrOutputParser()
                 status.markdown(f"✍️ AIが原稿を書いています...{_SPINNER_HTML}", unsafe_allow_html=True)
+                stop_rotation = _start_status_rotation(status, interval=5)
                 inputs = {"context": context, "chat_history": chat_history, "question": question}
-                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status))
+                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status, stop_rotation))
 
             clean_answer = displayed
             nq_raw = st.session_state.pop("_streamed_nq_raw", None)
