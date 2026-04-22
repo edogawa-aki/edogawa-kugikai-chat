@@ -2,6 +2,8 @@ import os
 import re
 import json
 import uuid
+import queue
+import threading
 import gspread
 from datetime import datetime
 import streamlit as st
@@ -196,6 +198,61 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 
+def stream_and_extract(chain, inputs):
+    """chain.stream() から [NEXT_QUESTIONS] ブロックを除去しながら yield する。
+    ブロック内容は st.session_state._streamed_nq_raw に格納される。"""
+    buffer = ""
+    in_block = False
+    block_buf = ""
+    st.session_state._streamed_nq_raw = None
+
+    for chunk in chain.stream(inputs):
+        if not isinstance(chunk, str):
+            chunk = chunk.content if hasattr(chunk, "content") else str(chunk)
+
+        if not in_block:
+            buffer += chunk
+            if "[NEXT_QUESTIONS]" in buffer:
+                before, rest = buffer.split("[NEXT_QUESTIONS]", 1)
+                if before:
+                    yield before
+                buffer = rest
+                in_block = True
+            else:
+                safe, tail = buffer.rsplit("\n", 1) if "\n" in buffer else ("", buffer)
+                if safe:
+                    yield safe + "\n"
+                    buffer = tail
+        else:
+            block_buf += chunk
+            if "[/NEXT_QUESTIONS]" in block_buf:
+                content, _ = block_buf.split("[/NEXT_QUESTIONS]", 1)
+                st.session_state._streamed_nq_raw = content
+                break
+
+    if not in_block and buffer.strip():
+        yield buffer
+
+
+_SPINNER_HTML = (
+    '<span style="display:inline-block;width:13px;height:13px;'
+    'border:2px solid #ccc;border-top-color:#888;border-radius:50%;'
+    'animation:_spin 0.8s linear infinite;vertical-align:middle;margin-left:6px">'
+    '</span>'
+    '<style>@keyframes _spin{to{transform:rotate(360deg)}}</style>'
+)
+
+
+def _stream_clear_status(gen, status_placeholder):
+    """最初のチャンクが来た瞬間にステータスプレースホルダーを消去するラッパー。"""
+    first = True
+    for chunk in gen:
+        if first:
+            status_placeholder.empty()
+            first = False
+        yield chunk
+
+
 @st.cache_data(show_spinner=False)
 def get_recent_meetings():
     json_path = os.path.join(os.path.dirname(__file__), "recent_meetings.json")
@@ -235,16 +292,35 @@ recent_prompt = ChatPromptTemplate.from_messages([
 ])
 
 
+_log_queue: queue.Queue = queue.Queue(maxsize=100)
+
+
+def _log_worker():
+    while True:
+        try:
+            item = _log_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            question, answer, source, user_id, session_id = item
+            credentials = st.secrets["gcp_service_account"]
+            gc = gspread.service_account_from_dict(credentials)
+            sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
+            worksheet = sh.get_worksheet(0)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            worksheet.append_row([now, user_id, session_id, source, question, answer])
+        except Exception:
+            print("Logging error: failed to write to spreadsheet")
+
+
+threading.Thread(target=_log_worker, daemon=True).start()
+
+
 def save_log(question, answer, source="manual", user_id="", session_id=""):
     try:
-        credentials = st.secrets["gcp_service_account"]
-        gc = gspread.service_account_from_dict(credentials)
-        sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
-        worksheet = sh.get_worksheet(0)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        worksheet.append_row([now, user_id, session_id, source, question, answer])
-    except Exception as e:
-        print("Logging error: failed to write to spreadsheet")
+        _log_queue.put_nowait((question, answer, source, user_id, session_id))
+    except queue.Full:
+        print("Logging error: queue full")
 
 
 if "messages" not in st.session_state:
@@ -379,52 +455,48 @@ if question:
             chat_history.append(AIMessage(content=m["content"]))
 
     with st.chat_message("assistant", avatar="🦉"):
-        with st.spinner("回答を生成中..."):
-            try:
-                if source == "suggest_recent":
-                    # 直近会議モード: 会議ごとにsearch_docsを呼んでcontextを結合
-                    all_docs = []
-                    for m in meetings:
-                        q = f"{m['date_jp']} {m['meeting_name']} 議題 議論"
-                        all_docs.extend(search_docs(vectorstore, q, k=5))
-                    context = format_docs(all_docs)
-                    chain = recent_prompt | llm | StrOutputParser()
-                    answer = chain.invoke({"context": context, "question": question})
-                else:
-                    docs = search_docs(vectorstore, question)
-                    context = format_docs(docs)
-                    print(f"[DEBUG] context先頭300文字: {context[:300]}", flush=True)
-                    chain = prompt | llm | StrOutputParser()
-                    answer = chain.invoke({
-                        "context": context,
-                        "chat_history": chat_history,
-                        "question": question,
-                    })
-                nq_match = re.search(r'\[NEXT_QUESTIONS\](.*?)\[/NEXT_QUESTIONS\]', answer, re.DOTALL)
-                next_questions = []
-                if nq_match:
-                    block = nq_match.group(1)
-                    next_questions = [
-                        line.strip().lstrip('- ').strip()
-                        for line in block.strip().split('\n')
-                        if line.strip().startswith('-')
-                    ]
-                    clean_answer = re.sub(
-                        r'\s*\[NEXT_QUESTIONS\].*?\[/NEXT_QUESTIONS\]', '',
-                        answer, flags=re.DOTALL
-                    ).strip()
-                else:
-                    clean_answer = answer
-                st.markdown(clean_answer)
-                save_log(question, clean_answer, source, cookies["user_id"], st.session_state.session_id)
-                st.session_state.messages.append({"role": "assistant", "content": clean_answer})
-                st.session_state._scroll_to_bottom = True
-                if next_questions:
-                    st.session_state.next_questions = next_questions
-                    st.session_state._last_source = source
-                    st.rerun()
-            except Exception as e:
-                st.error("申し訳ありません。回答の生成中にエラーが発生しました。時間をおいて再度お試しください。")
+        try:
+            status = st.empty()
+            if source == "suggest_recent":
+                # 直近会議モード: 会議ごとにsearch_docsを呼んでcontextを結合
+                status.markdown(f"📅 最近の会議を読み込んでいます...{_SPINNER_HTML}", unsafe_allow_html=True)
+                all_docs = []
+                for m in meetings:
+                    q = f"{m['date_jp']} {m['meeting_name']} 議題 議論"
+                    all_docs.extend(search_docs(vectorstore, q, k=5))
+                context = format_docs(all_docs)
+                chain = recent_prompt | llm | StrOutputParser()
+                status.markdown(f"✍️ AIが原稿を書いています...{_SPINNER_HTML}", unsafe_allow_html=True)
+                inputs = {"context": context, "question": question}
+                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status))
+            else:
+                status.markdown(f"🔍 議事録を読み込んでいます...{_SPINNER_HTML}", unsafe_allow_html=True)
+                docs = search_docs(vectorstore, question)
+                context = format_docs(docs)
+                print(f"[DEBUG] context先頭300文字: {context[:300]}", flush=True)
+                chain = prompt | llm | StrOutputParser()
+                status.markdown(f"✍️ AIが原稿を書いています...{_SPINNER_HTML}", unsafe_allow_html=True)
+                inputs = {"context": context, "chat_history": chat_history, "question": question}
+                displayed = st.write_stream(_stream_clear_status(stream_and_extract(chain, inputs), status))
+
+            clean_answer = displayed
+            nq_raw = st.session_state.pop("_streamed_nq_raw", None)
+            next_questions = []
+            if nq_raw:
+                next_questions = [
+                    line.strip().lstrip("- ").strip()
+                    for line in nq_raw.strip().split("\n")
+                    if line.strip().startswith("-")
+                ]
+            save_log(question, clean_answer, source, cookies["user_id"], st.session_state.session_id)
+            st.session_state.messages.append({"role": "assistant", "content": clean_answer})
+            st.session_state._scroll_to_bottom = True
+            if next_questions:
+                st.session_state.next_questions = next_questions
+                st.session_state._last_source = source
+                st.rerun()
+        except Exception as e:
+            st.error("申し訳ありません。回答の生成中にエラーが発生しました。時間をおいて再度お試しください。")
 
 if st.session_state.pop("_scroll_to_bottom", False):
     components.html("""
