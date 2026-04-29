@@ -10,6 +10,7 @@ faiss_index/
 build_index.py
 generate_recent_meetings.py
 plan.md
+改善調査
 
 # 元データ（綺麗なcleaned版だけ上げるため、元のファイルは除外）
 combined_全審査.md

@@ -24,26 +24,67 @@ st.set_page_config(
     page_title="教えて！えどがわ区議会AI",
     page_icon="🦉",
     layout="wide",
-)
-
-components.html(
-    """
-    <script>
-    window.parent.document.documentElement.lang = 'ja';
-    </script>
-    """,
-    height=0,
+    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-.block-container { padding-top: 1rem; }
+    [data-testid="stHeader"] {
+        background-color: transparent !important;
+    }
+    [data-testid="stDecoration"] {
+        visibility: hidden !important;
+    }
+    [data-testid="stToolbar"] {
+        visibility: hidden !important;
+    }
+    footer {visibility: hidden;}
+    /* サイドバー展開ボタンを強制表示＆最前面へ */
+    [data-testid="collapsedControl"] {
+        visibility: visible !important;
+        display: block !important;
+        z-index: 999999 !important;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
 [data-testid="stChatMessage"] h1 { font-size: 1.4rem; }
 [data-testid="stChatMessage"] h2 { font-size: 1.2rem; }
 [data-testid="stChatMessage"] h3 { font-size: 1.05rem; }
 [data-testid="stChatMessage"] h4 { font-size: 1.0rem; }
 @keyframes _fade1{0%,44%,100%{opacity:1}50%,94%{opacity:0}}
 @keyframes _fade2{0%,44%,100%{opacity:0}50%,94%{opacity:1}}
+/* pills内のテキスト見切れ防止 */
+[data-testid="stPills"] button,
+[data-testid="stPills"] button p,
+[data-testid="stPills"] button span {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: unset !important;
+    word-break: break-all !important;
+    height: auto !important;
+    min-height: 2rem !important;
+    line-height: 1.4 !important;
+}
+/* チャット入力欄に薄い影をつけて浮遊感を出す */
+[data-testid="stChatInput"] {
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.04) !important;
+    border: none !important;
+}
+/* アバターを丸く */
+[data-testid="stChatMessageAvatarUser"],
+[data-testid="stChatMessageAvatarAssistant"] {
+    border-radius: 50% !important;
+}
+/* チャットバブルをテーマカラー（極淡い青）で装飾 */
+[data-testid="stChatMessage"] {
+    background-color: #F4F8FF !important;
+    border: 1px solid #C5D7FB !important;
+    border-radius: 12px !important;
+    padding: 1rem !important;
+    margin-bottom: 0.75rem !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -190,6 +231,8 @@ prompt = ChatPromptTemplate.from_messages([
 - 【多様性の確保（厳守）】回答を作成する際は、可能な限り「複数の異なる議員」の発言をピックアップし、多角的な視点を含めてください。特定の議員1人の発言だけで記事を構成するのは避けてください。
 - 万が一、読み込んだ議事録の中に1人の議員の発言しか含まれていない場合は、「今回の検索範囲では、主に〇〇委員から集的な質問がありました」と事実を明記し、議論の広がりが限定的であることを読者に伝えてください。
 - ❌禁止：「推進・賛成する意見：」「慎重・反対する意見：」「現状と課題：」といった単調な箇条書きのラベル付けは絶対に行かないでください。代わりに、具体的な内容を要約した魅力的な小見出し（###）を作成して整理してください。
+- 【議案名・条例名の明示（厳守）】検索結果のチャンクに「【議題】」タグが含まれる場合は、その議題名（例：「〇〇条例改正案の審査」「令和〇年度一般会計補正予算の審査」など）を必ず本文中に引用すること。議題名なしに「〇〇について議論がありました」と抽象的に述べることは禁止する。
+- 【発言コンテキストの活用（推奨）】チャンクに「【直前の発言】」タグが含まれる場合は、その文脈（誰が何を言った直後の発言か）を考慮して発言の意図を正確に解釈すること。特に「賛成します」「了解しました」などの短い発言は、直前の発言を参照して何に同意したかを明記すること。
 
 【次の質問候補の生成（必須）】
 回答の最後に、以下のルールに従って5つの質問候補を生成し、[NEXT_QUESTIONS] ブロックに出力してください。
@@ -234,8 +277,15 @@ def stream_and_extract(chain, inputs):
                 before, rest = buffer.split("[NEXT_QUESTIONS]", 1)
                 if before:
                     yield before
-                buffer = rest
+                # rest をそのまま block_buf に移す（buffer でなく）
+                block_buf = rest
+                buffer = ""
                 in_block = True
+                # 同一チャンク内に [/NEXT_QUESTIONS] が既にある場合
+                if "[/NEXT_QUESTIONS]" in block_buf:
+                    content, _ = block_buf.split("[/NEXT_QUESTIONS]", 1)
+                    st.session_state._streamed_nq_raw = content
+                    return
             else:
                 safe, tail = buffer.rsplit("\n", 1) if "\n" in buffer else ("", buffer)
                 if safe:
@@ -246,10 +296,12 @@ def stream_and_extract(chain, inputs):
             if "[/NEXT_QUESTIONS]" in block_buf:
                 content, _ = block_buf.split("[/NEXT_QUESTIONS]", 1)
                 st.session_state._streamed_nq_raw = content
-                break
+                return
 
+    # ストリーム終了時の後処理
     if not in_block and buffer.strip():
         yield buffer
+    # in_block のまま終了した場合（モデルが閉じタグを出力しなかった）は questions なしで終了
 
 
 _SPINNER_HTML = (
@@ -264,9 +316,9 @@ _SPINNER_HTML = (
 def _rotating_status_html() -> str:
     return (
         '<div style="position:relative;height:1.6em;font-size:1rem">'
-        f'<span style="position:absolute;animation:_fade1 10s ease-in-out infinite">'
+        f'<span style="position:absolute;animation:_fade1 6s ease-in-out infinite">'
         f'✍️ AIが原稿を書いています...{_SPINNER_HTML}</span>'
-        f'<span style="position:absolute;animation:_fade2 10s ease-in-out infinite">'
+        f'<span style="position:absolute;animation:_fade2 6s ease-in-out infinite">'
         f'⏳ もう少しお待ちください...{_SPINNER_HTML}</span>'
         '</div>'
     )
@@ -280,6 +332,83 @@ def _stream_clear_status(gen, status_placeholder):
             status_placeholder.empty()
             first = False
         yield chunk
+
+
+_SPEAKER_BADGE = {
+    "理事者": ("background:#f3e8ff;color:#7e22ce", "🏛️"),
+    "委員長": ("background:#fff7ed;color:#c2410c", "⚖️"),
+    "議長":   ("background:#fffbeb;color:#b45309", "🔔"),
+    "議員":   ("background:#f0fdf4;color:#15803d", "💬"),
+}
+
+_REIWA_BASE = 2018  # 令和N年 = 2018 + N
+
+
+def _parse_doc(doc) -> dict:
+    """page_content のテキストから発言メタ情報を抽出する。"""
+    c = doc.page_content
+    def _get(pattern):
+        m = re.search(pattern, c)
+        return m.group(1).strip() if m else ""
+
+    date_jp  = _get(r"開催日：(.+)")
+    speaker  = _get(r"発言者：([^（\n]+)")
+    stype    = _get(r"属性：([^）\n]+)")
+    committee = _get(r"会議名：[^（\n]*（([^）\n]+)）")
+    speech_m = re.search(r"発言内容：\n(.*?)(?:\n---|$)", c, re.DOTALL)
+    speech   = speech_m.group(1).strip() if speech_m else c
+    agenda_title = _get(r"【議題】(.+)")
+
+    # 令和→西暦変換（令和N年 → 2018+N）
+    reiwa_m = re.search(r"令和(\d+)年", date_jp)
+    year = (_REIWA_BASE + int(reiwa_m.group(1))) if reiwa_m else None
+    # 西暦がそのまま書かれている場合のフォールバック
+    if year is None:
+        wy = re.search(r"(\d{4})年", date_jp)
+        year = int(wy.group(1)) if wy else None
+
+    return {
+        "date_jp": date_jp,
+        "speaker": speaker or "不明",
+        "stype": stype,
+        "committee": committee,
+        "speech": speech,
+        "year": year,
+        "agenda_title": agenda_title,
+    }
+
+
+def _render_source_cards(docs: list):
+    """検索結果docsをカード形式で表示する。"""
+    seen: set[str] = set()
+    unique_docs = []
+    for d in docs:
+        key = d.page_content[:100]
+        if key not in seen:
+            seen.add(key)
+            unique_docs.append(d)
+
+    parsed = [_parse_doc(d) for d in unique_docs]
+    st.caption(f"参照した発言：{len(parsed)} 件")
+
+    for p in parsed:
+        badge_style, badge_icon = _SPEAKER_BADGE.get(
+            p["stype"], ("background:#eff6ff;color:#1d4ed8", "📋")
+        )
+        with st.container(border=True):
+            header_parts = []
+            if p.get("agenda_title"):
+                header_parts.append(
+                    f'<span style="font-size:0.75rem;padding:2px 8px;border-radius:4px;'
+                    f'background:#e0f2fe;color:#0369a1;font-weight:600;">📋 {p["agenda_title"]}</span>'
+                )
+            header_parts.append(
+                f'<span style="font-size:0.75rem;padding:2px 8px;border-radius:4px;'
+                f'font-weight:600;{badge_style}">{badge_icon} {p["stype"]}</span>'
+            )
+            st.markdown(" ".join(header_parts), unsafe_allow_html=True)
+            st.markdown(f'**{p["speaker"]}**　{p["committee"]}　{p["date_jp"]}')
+            st.caption(p["speech"][:400] + ("…" if len(p["speech"]) > 400 else ""))
 
 
 @st.cache_data(show_spinner=False)
@@ -355,94 +484,184 @@ def save_log(question, answer, source="manual", user_id="", session_id=""):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-st.title("🔰 教えて！えどがわ議会AI 🦉")
-st.markdown("「江戸川区政でどんな話がされているか知りたいが、議事録を読む時間がない…」を解決！江戸川区議会でどんな話し合いがあったのか、AIがやさしくお答えします✨")
-st.markdown("作成者：[あき@データで見る江戸川区](https://x.com/edogawa_aki)")
-st.info("🔒 **ログの収集について**\n\n入力内容はアプリ改善のため匿名で記録されます。個人情報は入力しないでください。", icon="ℹ️")
+with st.sidebar:
+    # 1. コンセプト説明カード
+    st.markdown(
+        """
+        <div style='background-color: #F4F8FF; border: 1px solid #C5D7FB; border-radius: 8px; padding: 1.2rem; margin-bottom: 1.5rem;'>
+            <div style='font-size: 1rem; font-weight: 700; color: #000060; margin-bottom: 0.5rem;'>えどがわ議会AIとは？</div>
+            <div style='font-size: 0.85rem; color: #475569; line-height: 1.6;'>
+                「議事録を読む時間がない…」を解決する区民のための検索アシスタントです。
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # 2. アプリの機能リスト
+    st.markdown(
+        """
+        <div style='padding-left: 0.2rem; margin-bottom: 2rem;'>
+            <div style='font-size: 0.85rem; color: #475569; margin-bottom: 0.6rem; display: flex; align-items: flex-start;'>
+                <span style='color: #3460FB; font-weight: 900; margin-right: 0.6rem; font-size: 0.9rem;'>✓</span> <span style='line-height: 1.4;'>令和5年からの議論を網羅</span>
+            </div>
+            <div style='font-size: 0.85rem; color: #475569; margin-bottom: 0.6rem; display: flex; align-items: flex-start;'>
+                <span style='color: #3460FB; font-weight: 900; margin-right: 0.6rem; font-size: 0.9rem;'>✓</span> <span style='line-height: 1.4;'>AIが要点をわかりやすく解説</span>
+            </div>
+            <div style='font-size: 0.85rem; color: #475569; margin-bottom: 0.6rem; display: flex; align-items: flex-start;'>
+                <span style='color: #3460FB; font-weight: 900; margin-right: 0.6rem; font-size: 0.9rem;'>✓</span> <span style='line-height: 1.4;'>出典元の生の発言も確認可能</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # 3. メタ情報（フッター風）
+    st.markdown(
+        """
+        <div style='border-top: 1px solid #e2e8f0; padding-top: 1.2rem; margin-top: 2rem;'>
+            <div style='font-size: 0.75rem; color: #64748b; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.2rem;'>
+                <strong>作成者：</strong>
+                <a href="https://x.com/edogawa_aki" target="_blank" style='color: #3460FB; text-decoration: none;'>あき@データで見る江戸川区</a>
+            </div>
+            <div style='font-size: 0.7rem; color: #94a3b8; line-height: 1.6;'>
+                <span style='font-weight: bold;'>🔒 ログの収集について</span><br>
+                入力内容はアプリ改善のため匿名で記録されます。個人情報は入力しないでください。
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 AVATARS = {"user": "👤", "assistant": "🦉"}
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
-        st.markdown(message["content"])
-
-if (st.session_state.get("next_questions")
-        and st.session_state.messages
-        and st.session_state.messages[-1]["role"] == "assistant"):
-    is_recent_mode = st.session_state.get("_last_source") == "suggest_recent"
-    if is_recent_mode:
-        # 直近会議モード: 5件全て深掘りとして表示
-        all_qs = st.session_state.next_questions
-        st.markdown("**🔍 この会議を深掘りする**")
-        for i, nq in enumerate(all_qs):
-            if st.button(nq, key=f"next_q_hist_{i}", use_container_width=True):
-                st.session_state._suggest = nq
-                st.session_state._suggest_source = "suggest_next"
-                del st.session_state["next_questions"]
-                if "_last_source" in st.session_state:
-                    del st.session_state["_last_source"]
-                st.rerun()
-    else:
-        deep_qs = st.session_state.next_questions[:3]
-        other_qs = st.session_state.next_questions[3:]
-        st.markdown("**💡 関連する深掘り**")
-        dq_cols = st.columns(len(deep_qs)) if len(deep_qs) > 1 else [st.container()]
-        for i, nq in enumerate(deep_qs):
-            with dq_cols[i]:
-                if st.button(nq, key=f"next_q_hist_{i}", use_container_width=True):
-                    st.session_state._suggest = nq
-                    st.session_state._suggest_source = "suggest_next"
-                    del st.session_state["next_questions"]
-                    st.rerun()
-        if other_qs:
-            st.markdown("**🔀 他のトピックを見る**")
-            oq_cols = st.columns(len(other_qs)) if len(other_qs) > 1 else [st.container()]
-            for i, nq in enumerate(other_qs):
-                with oq_cols[i]:
-                    if st.button(nq, key=f"next_q_hist_other_{i}", use_container_width=True):
-                        st.session_state._suggest = nq
-                        st.session_state._suggest_source = "suggest_next"
-                        del st.session_state["next_questions"]
-                        st.rerun()
+_SUGGEST_MAP = {
+    "📅 最近の話題": "__RECENT__",
+    "💴 令和8年度予算": "令和8年度予算特別委員会で審議された主な項目と議論のポイントを教えてください。",
+    "👶 子育て支援": "子育て支援についてどのような議論がありましたか？",
+    "👴 高齢者福祉": "高齢者福祉についてはどのような議論がありましたか？",
+    "🏫 小中学校": "小中学校の環境についてどのような議論がありましたか？",
+    "💴 物価高騰対策": "物価高騰に対する生活支援や経済対策についてどのような議論がありましたか？",
+    "🐕 ペット・動物愛護": "犬や猫など、ペットの飼育環境や動物愛護についてはどのような議論がありましたか？",
+    "🌊 防災・水害対策": "防災や水害対策（ハザードマップや避難所など）についてどのような議論がありましたか？",
+    "🌳 公園・みどり": "公園の整備やみどりの環境づくりについてどのような議論がありましたか？",
+    "🚲 自転車・交通": "自転車の安全対策や交通マナーについてはどのような議論がありましたか？",
+    "🏢 中小企業支援": "法人の設立支援や、中小企業への施策についてどのような議論がありましたか？",
+    "💻 デジタル化・DX": "デジタル化・DXの進展についてはどのような議論がありましたか？",
+}
 
 if not st.session_state.messages and "_suggest" not in st.session_state:
-    st.markdown("💡 **まずは、気になるボタンをタップしてみてね！**")
-    suggest_question = None
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("👶 子育て支援について", use_container_width=True):
-            suggest_question = "子育て支援についてどのような議論がありましたか？"
-        if st.button("💻 デジタル化・DXの進展について", use_container_width=True):
-            suggest_question = "デジタル化・DXの進展についてはどのような議論がありましたか？"
-    with col2:
-        if st.button("🏫 小中学校の環境について", use_container_width=True):
-            suggest_question = "小中学校の環境についてどのような議論がありましたか？"
-        if st.button("👴 高齢者福祉について", use_container_width=True):
-            suggest_question = "高齢者福祉についてはどのような議論がありましたか？"
-    with st.expander("➕ もっと他のテーマを見る"):
-        ecol1, ecol2 = st.columns(2)
-        with ecol1:
-            if st.button("🌊 防災・水害対策について", use_container_width=True):
-                suggest_question = "防災や水害対策（ハザードマップや避難所など）についてどのような議論がありましたか？"
-            if st.button("🌳 公園・みどりの充実について", use_container_width=True):
-                suggest_question = "公園の整備やみどりの環境づくりについてどのような議論がありましたか？"
-            if st.button("🚲 自転車・交通マナーについて", use_container_width=True):
-                suggest_question = "自転車の安全対策や交通マナーについてはどのような議論がありましたか？"
-        with ecol2:
-            if st.button("🐕 ペット・動物愛護について", use_container_width=True):
-                suggest_question = "犬や猫など、ペットの飼育環境や動物愛護についてはどのような議論がありましたか？"
-            if st.button("🏢 起業・中小企業への支援について", use_container_width=True):
-                suggest_question = "法人の設立支援や、中小企業への施策についてどのような議論がありましたか？"
-            if st.button("💴 物価高騰・生活支援について", use_container_width=True):
-                suggest_question = "物価高騰に対する生活支援や経済対策についてどのような議論がありましたか？"
-    st.divider()
-    if st.button("📅 最近の区議会の話題を知りたい", use_container_width=True, type="primary"):
-        st.session_state._recent_mode = True
-        st.rerun()
-    if suggest_question:
-        st.session_state._suggest = suggest_question
-        st.session_state._suggest_source = "suggest_initial"
-        st.rerun()
+    # --- Empty State（初回アクセス）---
+    st.markdown(
+        """
+        <div style='margin-bottom: 2rem; margin-top: 1rem;'>
+            <h1 style='text-align: left; color: #000060; font-size: 1.8rem; font-weight: 700; margin-bottom: 0.2rem; letter-spacing: 0.05em;'>教えて！えどがわ議会AI</h1>
+            <p style='text-align: left; color: #64748b; font-size: 0.9rem; margin-top: 0;'>江戸川区議会の過去の議論をAIがやさしく解説します。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.chat_message("assistant", avatar="🦉"):
+        st.markdown(
+            "こんにちは！江戸川区議会に関する過去の議論をわかりやすく解説します。"
+            "気になるトピックを選んでみてください。"
+        )
+    with st.container(border=True):
+        st.markdown(
+            "<div style='font-size: 0.75rem; font-weight: 600; color: #64748b; letter-spacing: 0.1em; margin-bottom: 1.2rem; margin-top: 0;'>注目・トレンド</div>",
+            unsafe_allow_html=True,
+        )
+        sel_trend = st.pills(
+            "trend",
+            ["📅 最近の話題", "💴 令和8年度予算"],
+            key="pills_trend",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div style='font-size: 0.75rem; font-weight: 600; color: #64748b; letter-spacing: 0.1em; margin-bottom: 1.2rem; margin-top: 1.5rem;'>暮らし・福祉</div>",
+            unsafe_allow_html=True,
+        )
+        sel_living = st.pills(
+            "living",
+            ["👶 子育て支援", "👴 高齢者福祉", "🏫 小中学校", "💴 物価高騰対策", "🐕 ペット・動物愛護"],
+            key="pills_living",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div style='font-size: 0.75rem; font-weight: 600; color: #64748b; letter-spacing: 0.1em; margin-bottom: 1.2rem; margin-top: 1.5rem;'>地域・インフラ</div>",
+            unsafe_allow_html=True,
+        )
+        sel_infra = st.pills(
+            "infra",
+            ["🌊 防災・水害対策", "🌳 公園・みどり", "🚲 自転車・交通", "🏢 中小企業支援", "💻 デジタル化・DX"],
+            key="pills_infra",
+            label_visibility="collapsed",
+        )
+    for sel in [sel_trend, sel_living, sel_infra]:
+        if sel:
+            mapped = _SUGGEST_MAP.get(sel, sel)
+            if mapped == "__RECENT__":
+                st.session_state._recent_mode = True
+            else:
+                st.session_state._suggest = mapped
+                st.session_state._suggest_source = "suggest_initial"
+            st.rerun()
+else:
+    # --- Chat Mode（会話中）---
+    for i, message in enumerate(st.session_state.messages):
+        is_last_ai_with_docs = (
+            message["role"] == "assistant"
+            and i == len(st.session_state.messages) - 1
+            and st.session_state.get("_last_docs")
+            and st.session_state.get("_last_source") != "suggest_recent"
+        )
+        if is_last_ai_with_docs:
+            with st.chat_message("assistant", avatar="🦉"):
+                tab1, tab2 = st.tabs(["🦉 AI解説", "📄 元の議事録"])
+                with tab1:
+                    with st.container(height=400, border=False):
+                        st.markdown(message["content"])
+                with tab2:
+                    with st.container(height=400, border=False):
+                        _render_source_cards(st.session_state._last_docs)
+        else:
+            with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
+                st.markdown(message["content"])
+
+    if (st.session_state.get("next_questions")
+            and st.session_state.messages
+            and st.session_state.messages[-1]["role"] == "assistant"):
+        is_recent_mode = st.session_state.get("_last_source") == "suggest_recent"
+        all_qs = st.session_state.next_questions
+        chosen = None
+
+        if is_recent_mode:
+            st.markdown("**🔍 この会議を深掘りする**")
+            for i, nq in enumerate(all_qs):
+                if st.button(nq, key=f"nq_{len(st.session_state.messages)}_{i}", use_container_width=True):
+                    chosen = nq
+                    del st.session_state["next_questions"]
+                    if "_last_source" in st.session_state:
+                        del st.session_state["_last_source"]
+        else:
+            deep_qs = all_qs[:3]
+            other_qs = all_qs[3:]
+            st.markdown("**💡 続けてこんな質問はいかがですか？**")
+            for i, nq in enumerate(deep_qs):
+                if st.button(nq, key=f"nq_{len(st.session_state.messages)}_{i}", use_container_width=True):
+                    chosen = nq
+                    del st.session_state["next_questions"]
+            if other_qs:
+                st.markdown("**🔀 他のトピックを見る**")
+                for i, nq in enumerate(other_qs):
+                    if st.button(nq, key=f"nq_{len(st.session_state.messages)}_o{i}", use_container_width=True):
+                        chosen = nq
+                        del st.session_state["next_questions"]
+
+        if chosen:
+            st.session_state._suggest = chosen
+            st.session_state._suggest_source = "suggest_next"
+            st.rerun()
 
 chat_input_question = st.chat_input(
     "質問してみてね（例：予算審査で議論された主な項目は？　〇〇議員はどんな質問をしている？）"
@@ -488,6 +707,7 @@ if question:
             status = st.empty()
             if source == "suggest_recent":
                 # 直近会議モード: 会議ごとにsearch_docsを呼んでcontextを結合
+                st.session_state._last_docs = None
                 status.markdown(f"📅 最近の会議を読み込んでいます...{_SPINNER_HTML}", unsafe_allow_html=True)
                 all_docs = []
                 for m in meetings:
@@ -501,6 +721,7 @@ if question:
             else:
                 status.markdown(f"🔍 議事録を読み込んでいます...{_SPINNER_HTML}", unsafe_allow_html=True)
                 docs = search_docs(vectorstore, question)
+                st.session_state._last_docs = docs
                 context = format_docs(docs)
                 print(f"[DEBUG] context先頭300文字: {context[:300]}", flush=True)
                 chain = prompt | llm | StrOutputParser()
@@ -539,3 +760,12 @@ if st.session_state.pop("_scroll_to_bottom", False):
         }, 300);
     </script>
     """, height=0)
+
+components.html(
+    """
+    <script>
+    window.parent.document.documentElement.lang = 'ja';
+    </script>
+    """,
+    height=0,
+)
